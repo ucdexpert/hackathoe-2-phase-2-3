@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import Header from '@/components/Header';
 import TaskList from '@/components/TaskList';
@@ -12,36 +12,139 @@ import { X, Sparkles } from 'lucide-react';
 // import { ChatInterface } from '@/components/ChatInterface';
 
 // Simple Chat Interface (replace with your actual ChatInterface)
-function SimpleChatInterface({ userId, token }: { userId: string; token: string }) {
+function SimpleChatInterface({ userId, token, userName }: { userId: string; token: string; userName: string }) {
   const [messages, setMessages] = useState<any[]>([]);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
+  const [currentConversationId, setCurrentConversationId] = useState<number | null>(null);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  // Get user initial from name
+  const userInitial = userName ? userName.charAt(0).toUpperCase() : 'U';
+
+  // Load conversation history on component mount
+  useEffect(() => {
+    const loadConversationHistory = async () => {
+      try {
+        // Get user's latest conversation
+        const conversationsResponse = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/${userId}/conversations`, {
+          headers: {
+            'Authorization': `Bearer ${token}`,
+            'Content-Type': 'application/json'
+          }
+        });
+
+        if (!conversationsResponse.ok) {
+          throw new Error(`Failed to fetch conversations: ${conversationsResponse.status}`);
+        }
+
+        const conversations = await conversationsResponse.json();
+
+        if (conversations.length > 0) {
+          // Get the most recent conversation
+          const latestConversation = conversations[0];
+          setCurrentConversationId(latestConversation.id);
+
+          // Get messages for this conversation
+          const messagesResponse = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/${userId}/conversations/${latestConversation.id}/messages`, {
+            headers: {
+              'Authorization': `Bearer ${token}`,
+              'Content-Type': 'application/json'
+            }
+          });
+
+          if (!messagesResponse.ok) {
+            throw new Error(`Failed to fetch messages: ${messagesResponse.status}`);
+          }
+
+          const messages = await messagesResponse.json();
+          setMessages(messages.map((msg: any) => ({
+            id: msg.id,
+            role: msg.role,
+            content: msg.content,
+            createdAt: msg.created_at
+          })));
+        } else {
+          // No existing conversations, start fresh
+          setMessages([]);
+        }
+      } catch (error) {
+        console.error('Error loading conversation history:', error);
+        // Continue with empty messages if there's an error
+        setMessages([]);
+      }
+    };
+
+    loadConversationHistory();
+  }, [userId, token]);
+
+  // Auto-scroll to bottom when messages change
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages]);
 
   const handleSend = async () => {
     if (!input.trim()) return;
-    
+
     // Add user message
-    const userMsg = { role: 'user', content: input };
-    setMessages([...messages, userMsg]);
+    const userMsg = {
+      role: 'user',
+      content: input,
+      isPending: true // Mark as pending until we get the response
+    };
+    setMessages(prev => [...prev, userMsg]);
     setInput('');
     setLoading(true);
 
     try {
       // Call your chat API here
+      const requestBody: any = { message: input };
+      if (currentConversationId) {
+        requestBody.conversation_id = currentConversationId;
+      }
+
       const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/${userId}/chat`, {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${token}`,
           'Content-Type': 'application/json'
         },
-        body: JSON.stringify({ message: input })
+        body: JSON.stringify(requestBody)
       });
 
       const data = await response.json();
-      const aiMsg = { role: 'assistant', content: data.data?.response || 'Sorry, something went wrong.' };
+
+      // Update the user message to remove the pending state and add ID
+      setMessages(prev => {
+        const updated = [...prev];
+        const userMsgIndex = updated.findIndex(msg => msg.content === input && msg.isPending);
+        if (userMsgIndex !== -1) {
+          updated[userMsgIndex] = {
+            id: data.data?.user_message_id,
+            role: 'user',
+            content: input
+          };
+        }
+        return updated;
+      });
+
+      // Add the assistant's response with ID
+      const aiMsg = {
+        id: data.data?.ai_message_id,
+        role: 'assistant',
+        content: data.data?.response || 'Sorry, something went wrong.'
+      };
+
       setMessages(prev => [...prev, aiMsg]);
+
+      // Update conversation ID if it was created in this request
+      if (data.data?.conversation_id) {
+        setCurrentConversationId(data.data.conversation_id);
+      }
     } catch (error) {
       console.error('Chat error:', error);
+      // Remove the pending user message and show error
+      setMessages(prev => prev.filter(msg => !(msg.content === input && msg.isPending)));
       const errorMsg = { role: 'assistant', content: 'Connection error. Please try again.' };
       setMessages(prev => [...prev, errorMsg]);
     } finally {
@@ -58,7 +161,7 @@ function SimpleChatInterface({ userId, token }: { userId: string; token: string 
       </div>
 
       {/* Messages */}
-      <div className="flex-1 overflow-y-auto px-6 py-8 bg-gradient-to-b from-gray-50 to-white">
+      <div className="flex-1 overflow-y-auto px-6 py-8 bg-gray-50">
         {messages.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-full text-center">
             <div className="w-16 h-16 bg-gradient-to-br from-blue-500 to-purple-600 rounded-2xl flex items-center justify-center mb-6 shadow-lg">
@@ -72,26 +175,39 @@ function SimpleChatInterface({ userId, token }: { userId: string; token: string 
             </p>
           </div>
         ) : (
-          <div className="space-y-4">
+          <div className="space-y-6">
             {messages.map((msg, idx) => (
               <div
-                key={idx}
-                className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
+                key={msg.id || `msg-${idx}`}
+                className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'} items-start gap-3 mb-4`}
               >
-                <div
-                  className={`max-w-[80%] px-4 py-3 rounded-2xl ${
-                    msg.role === 'user'
-                      ? 'bg-blue-600 text-white rounded-br-sm'
-                      : 'bg-gray-200 text-gray-900 rounded-bl-sm'
-                  }`}
-                >
-                  {msg.content}
-                </div>
+                {msg.role === 'user' ? (
+                  <>
+                    <div className="bg-blue-600 text-white rounded-2xl px-4 py-2 max-w-[70%] shadow-sm">
+                      {msg.content}
+                    </div>
+                    <div className="w-10 h-10 rounded-full bg-blue-600 flex items-center justify-center text-white font-semibold flex-shrink-0">
+                      {userInitial}
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <div className="w-10 h-10 rounded-full bg-gray-200 flex items-center justify-center flex-shrink-0">
+                      🤖
+                    </div>
+                    <div className="bg-gray-100 text-gray-900 rounded-2xl px-4 py-2 max-w-[70%] shadow-sm">
+                      {msg.content}
+                    </div>
+                  </>
+                )}
               </div>
             ))}
             {loading && (
-              <div className="flex justify-start">
-                <div className="bg-gray-200 px-4 py-3 rounded-2xl rounded-bl-sm">
+              <div className="flex justify-start items-start gap-3 mb-4">
+                <div className="w-10 h-10 rounded-full bg-gray-200 flex items-center justify-center flex-shrink-0">
+                  🤖
+                </div>
+                <div className="bg-gray-100 text-gray-900 rounded-2xl px-4 py-2 max-w-[70%] shadow-sm">
                   <div className="flex gap-1">
                     <span className="w-2 h-2 bg-gray-500 rounded-full animate-bounce" style={{ animationDelay: '0ms' }}></span>
                     <span className="w-2 h-2 bg-gray-500 rounded-full animate-bounce" style={{ animationDelay: '150ms' }}></span>
@@ -100,6 +216,7 @@ function SimpleChatInterface({ userId, token }: { userId: string; token: string 
                 </div>
               </div>
             )}
+            <div ref={messagesEndRef} />
           </div>
         )}
       </div>
@@ -113,7 +230,7 @@ function SimpleChatInterface({ userId, token }: { userId: string; token: string 
             onChange={(e) => setInput(e.target.value)}
             onKeyPress={(e) => e.key === 'Enter' && handleSend()}
             placeholder="Ask me anything about your todos..."
-            className="flex-1 px-4 py-3 border-2 border-gray-200 rounded-xl focus:outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-100 transition-all"
+            className="flex-1 px-4 py-3 border border-gray-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all shadow-sm"
             disabled={loading}
           />
           <button
@@ -124,20 +241,33 @@ function SimpleChatInterface({ userId, token }: { userId: string; token: string 
             {loading ? 'Sending...' : 'Send'}
           </button>
         </div>
-        <p className="text-xs text-gray-400 text-center mt-3">
-          AI can make mistakes. Check important info.
-        </p>
+        <div className="flex justify-between items-center mt-3">
+          <button
+            onClick={() => {
+              // Start a new conversation by resetting messages and conversation ID
+              setMessages([]);
+              setCurrentConversationId(null);
+            }}
+            className="px-4 py-2 text-sm bg-white border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-50 font-medium shadow-sm transition-all"
+          >
+            New Conversation
+          </button>
+          <p className="text-xs text-gray-500">
+            AI can make mistakes. Check important info.
+          </p>
+        </div>
       </div>
     </div>
   );
 }
 
 // ChatModal Component
-function ChatModal({ isOpen, onClose, userId, token }: { 
-  isOpen: boolean; 
-  onClose: () => void; 
-  userId: string; 
+function ChatModal({ isOpen, onClose, userId, token, userName }: {
+  isOpen: boolean;
+  onClose: () => void;
+  userId: string;
   token: string;
+  userName: string;
 }) {
   if (!isOpen) return null;
 
@@ -148,7 +278,7 @@ function ChatModal({ isOpen, onClose, userId, token }: {
         className="fixed inset-0 bg-black/60 backdrop-blur-sm z-40 animate-fadeIn"
         onClick={onClose}
       />
-      
+
       {/* Modal */}
       <div className="fixed inset-0 z-50 flex items-center justify-center p-4 pointer-events-none">
         <div
@@ -163,10 +293,10 @@ function ChatModal({ isOpen, onClose, userId, token }: {
           >
             <X className="w-5 h-5 text-gray-600 group-hover:text-gray-900" />
           </button>
-          
+
           {/* Chat Interface */}
           <div className="h-full overflow-hidden">
-            <SimpleChatInterface userId={userId} token={token} />
+            <SimpleChatInterface userId={userId} token={token} userName={userName} />
           </div>
         </div>
       </div>
@@ -235,6 +365,7 @@ export default function DashboardPage() {
         isOpen={isChatOpen}
         onClose={() => setIsChatOpen(false)}
         userId={user?.id || ''}
+        userName={user?.name || 'User'}
         token={getToken() || ''}
       />
     </div>
